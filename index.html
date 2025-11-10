@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Provincias de Argentina – Juego</title>
+<meta name="theme-color" content="#0ea5e9" />
+<style>
+:root{ --ok:#22c55e; --bad:#ef4444; --line:#1e293b; --accent:#0ea5e9; }
+*{box-sizing:border-box}
+body{
+  margin:0; background:#f8fafc; color:#0f172a;
+  font-family:system-ui,-apple-system,"Segoe UI",Roboto,Ubuntu,Cantarell,"Noto Sans";
+  padding:14px; text-align:center;
+}
+h1{margin:.25rem 0 .5rem; font-size:1.6rem}
+p{margin:.5rem 0}
+
+/* MAPA GRANDE */
+.mapBox{
+  width:100%;
+  height:calc(100vh - 240px);
+  max-height:95vh;
+  border:1px solid #cbd5e1; border-radius:12px; overflow:hidden;
+  background:#fff; position:relative;
+}
+.mapBox.with-bg{
+  /* Tu imagen: cambiá a .png si corresponde */
+  background:#fff url("./assets/mapa-politico.jpg") center/contain no-repeat;
+}
+svg{width:100%;height:100%;display:block;touch-action:none}
+
+/* Provincias clickables */
+path{
+  vector-effect:non-scaling-stroke;
+  stroke:var(--line); stroke-width:2;
+  cursor:pointer;
+}
+
+/* Por si en algún render quedó un círculo viejo: lo ocultamos */
+svg circle { display:none !important; }
+
+/* Botones */
+.zoomBtns{
+  position:absolute; right:10px; top:10px;
+  display:flex; flex-direction:column; gap:8px; z-index:10;
+}
+.zoomBtns button{
+  border:1px solid #cbd5e1; background:#ffffffcc; color:#0f172a;
+  border-radius:10px; padding:6px 10px; font-size:1.1rem; cursor:pointer;
+}
+
+.controls{display:flex; justify-content:center; gap:8px; margin-top:12px}
+input[type="text"]{
+  border:1px solid #cbd5e1; border-radius:10px; padding:10px 12px; font-size:1rem; width:min(520px,90vw);
+}
+button.action{
+  background:var(--accent); color:#fff; border:none; border-radius:10px; padding:10px 14px; font-size:1rem; font-weight:600; cursor:pointer;
+}
+.badge{display:inline-block; background:#ecfdf5; color:#065f46; padding:6px 10px; border-radius:999px; font-weight:700; margin-top:8px}
+.msg{min-height:1.2em; margin-top:8px}
+</style>
+</head>
+<body>
+  <h1>🇦🇷 Provincias de Argentina – Juego</h1>
+  <p>1) Tocá una provincia (queda celeste). 2) Escribí su nombre. 3) Correcto = verde, incorrecto = rojo.</p>
+
+  <div id="map" class="mapBox with-bg">
+    <div class="zoomBtns">
+      <!-- Soporta ambos juegos de IDs -->
+      <button id="btnPlus">+</button>
+      <button id="btnMinus">−</button>
+      <button id="btnReset">⟳</button>
+
+      <button id="zoomIn"   style="display:none">+</button>
+      <button id="zoomOut"  style="display:none">−</button>
+      <button id="resetZoom"style="display:none">⟳</button>
+    </div>
+  </div>
+
+  <div class="controls">
+    <input id="guess" type="text" placeholder="Escribí el nombre de la provincia" autocomplete="off" />
+    <button id="check" class="action">Comprobar</button>
+  </div>
+  <div class="msg" id="message"></div>
+  <div class="badge">Aciertos: <span id="score">0</span>/24</div>
+  <div style="margin-top:8px">
+    <button id="reset" style="background:#fff;color:#0f172a;border:1px solid #cbd5e1;border-radius:10px;padding:8px 12px">Reiniciar</button>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/d3@7"></script>
+  <script>
+  /* ===== Config ===== */
+  const WIDTH = 900, HEIGHT = 1200;
+  const GEO_URL = "https://apis.datos.gob.ar/georef/api/provincias?formato=geojson";
+
+  /* ===== Estado ===== */
+  let status = {};          // { id: "ok" | "bad" }
+  let selectedId = null;    // id seleccionada
+  let selectedName = "";    // nombre real (no se muestra)
+  let score = 0;
+
+  /* ===== DOM ===== */
+  const mapBox = document.getElementById("map");
+  const msgEl   = document.getElementById("message");
+  const scoreEl = document.getElementById("score");
+  const guessEl = document.getElementById("guess");
+
+  /* ===== SVG / D3 ===== */
+  // Limpiamos el contenedor pero preservamos los botones
+  const btns = mapBox.querySelector(".zoomBtns");
+  mapBox.innerHTML = "";
+  mapBox.appendChild(btns);
+
+  const svg = d3.select("#map").append("svg").attr("viewBox",[0,0,WIDTH,HEIGHT]);
+  const g   = svg.append("g");
+
+  // Borramos cualquier círculo por si quedó de versiones anteriores
+  svg.selectAll("circle").remove();
+
+  const projection = d3.geoMercator()
+    .center([-64,-40])   // encuadre Argentina + TDF
+    .scale(1300)
+    .translate([WIDTH/2, HEIGHT/1.5]);
+  const path = d3.geoPath(projection);
+
+  const zoom = d3.zoom().scaleExtent([1,8]).on("zoom", ev => g.attr("transform", ev.transform));
+  svg.call(zoom).on("dblclick.zoom", null);
+
+  /* ===== Colores ===== */
+  function fillFor(d){
+    const id = d.id;
+    const st = status[id];
+    if (st === "ok")  return "rgba(34,197,94,0.85)";      // verde
+    if (st === "bad") return "rgba(239,68,68,0.70)";      // rojo
+    if (id === selectedId) return "rgba(147,197,253,0.55)"; // celeste seleccionado
+    return "transparent";
+  }
+  function repaint(){ g.selectAll("path").attr("fill", fillFor); }
+
+  /* ===== Carga y dibujo ===== */
+  fetch(GEO_URL)
+    .then(r=>r.json())
+    .then(geo=>{
+      const features = geo.features;
+      g.selectAll("path")
+        .data(features, d=>d.id)
+        .join("path")
+        .attr("d", path)
+        .attr("fill", fillFor)
+        .attr("stroke", "#1e293b")
+        .attr("stroke-width", 2)
+        .style("cursor","pointer")
+        .on("click", (_e, d) => {
+          selectedId   = d.id;
+          selectedName = d.properties?.nombre || "";
+          msgEl.textContent = "Provincia seleccionada.";   // no mostramos el nombre
+          repaint();
+          guessEl.focus();
+        });
+
+      // Seguridad extra: si hubiera círculos fuera del <g>, también los sacamos
+      svg.selectAll("circle").remove();
+    })
+    .catch(err => {
+      msgEl.textContent = "Error cargando el mapa.";
+      console.error(err);
+    });
+
+  /* ===== Botones de zoom (ambos juegos de IDs) ===== */
+  const plus  = document.getElementById("btnPlus")  || document.getElementById("zoomIn");
+  const minus = document.getElementById("btnMinus") || document.getElementById("zoomOut");
+  const reset = document.getElementById("btnReset") || document.getElementById("resetZoom");
+
+  plus.onclick  = () => svg.transition().duration(200).call(zoom.scaleBy, 1.4);
+  minus.onclick = () => svg.transition().duration(200).call(zoom.scaleBy, 1/1.4);
+  reset.onclick = () => svg.transition().duration(200).call(zoom.transform, d3.zoomIdentity);
+
+  /* ===== Comprobar ===== */
+  document.getElementById("check").onclick = () => {
+    if (!selectedId){
+      msgEl.textContent = "Tocá una provincia primero."; guessEl.focus(); return;
+    }
+    const val = guessEl.value.trim().toLowerCase();
+    const ok  = val === selectedName.toLowerCase();
+
+    const prev = status[selectedId];
+    status[selectedId] = ok ? "ok" : "bad";
+    if (ok && prev !== "ok"){ score++; scoreEl.textContent = score; }
+
+    msgEl.textContent = ok ? "✅ ¡Correcto!" : "❌ Incorrecto";
+    guessEl.value = ""; guessEl.focus();
+    repaint();
+  };
+
+  /* ===== Reiniciar ===== */
+  document.getElementById("reset").onclick = () => {
+    status = {}; selectedId = null; selectedName = ""; score = 0;
+    scoreEl.textContent = "0"; msgEl.textContent = ""; guessEl.value = "";
+    repaint();
+    svg.transition().duration(200).call(zoom.transform, d3.zoomIdentity);
+  };
+
+  /* Enter = comprobar */
+  guessEl.addEventListener("keydown", e => {
+    if (e.key === "Enter"){ e.preventDefault(); document.getElementById("check").click(); }
+  });
+  </script>
+</body>
+</html>
